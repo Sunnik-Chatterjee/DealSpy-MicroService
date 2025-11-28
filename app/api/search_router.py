@@ -1,17 +1,29 @@
-# app/api/search_router.py
-from typing import List, Optional
+from typing import List
 from fastapi import APIRouter, Query
-from app.services.preview_search import preview_lowest_by_name
+from pydantic import BaseModel
 
-router = APIRouter(prefix="/v1/search", tags=["preview"])
+from app.services.search import search_products_sorted
 
-@router.get("/lowest")
-def lowest_by_name(
-    q: str = Query(..., description="Product name to search"),
-    domains: Optional[List[str]] = Query(None, description="Override India domains"),
+router = APIRouter(prefix="/v1/search", tags=["search"])
+
+
+class ProductData(BaseModel):
+    productName: str
+    price: str
+    platform: str
+    deepLink: str
+    imageUrl: str | None = None
+
+
+class SearchResponse(BaseModel):
+    success: bool
+    message: str
+    data: List[ProductData]
+
+
+@router.get("/", response_model=SearchResponse)
+async def simple_product_search(
+    q: str = Query(..., description="Product to search (e.g., 'iPhone 14 128GB')")
 ):
-    """
-    Read-only search: returns lowest price + deeplink across India sites for the given product name.
-    Does not write to DB.
-    """
-    return preview_lowest_by_name(q, domains)
+
+    return search_products_sorted(query=q, limit=15)

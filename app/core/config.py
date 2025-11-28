@@ -1,42 +1,38 @@
 # app/core/config.py
-
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from functools import lru_cache
 from typing import List
 
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
+
+
 class Settings(BaseSettings):
-    NEON_DB_URL: str
-    MISTRAL_API_KEY: str
-    TAVILY_API_KEY: str
-
-    USER_AGENT: str = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
+    tavily_api_key: str = Field(..., env="TAVILY_API_KEY")
+    india_ecom_domains: str = Field(
+        "amazon.in,flipkart.com",
+        env="INDIA_ECOM_DOMAINS",
     )
+    database_url: str = Field(..., env="DATABASE_URL")
 
-    # You can fully override this in .env
-    INDIA_ECOM_DOMAINS: str = (
-        "amazon.in,flipkart.com,reliancedigital.in,croma.com,"
-        "vijaysales.com"
-    )
-
-    MISTRAL_MODEL: str = "mistral-small-latest"
-
+    # 👇 This line is the important part
     model_config = SettingsConfigDict(
         env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
+        extra="ignore",  # ignore extra env vars like mistral_api_key, user_agent
     )
 
-settings = Settings()
+    @property
+    def india_domains_list(self) -> List[str]:
+        return [
+            d.strip()
+            for d in self.india_ecom_domains.split(",")
+            if d.strip()
+        ]
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
 
 
 def get_india_domains() -> List[str]:
-    raw = settings.INDIA_ECOM_DOMAINS
-    if not raw:
-        return []
-    return [
-        d.strip().lower()
-        for d in raw.split(",")
-        if d.strip()
-    ]
+    return get_settings().india_domains_list
