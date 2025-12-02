@@ -26,4 +26,4 @@ async def simple_product_search(
     q: str = Query(..., description="Product to search (e.g., 'iPhone 14 128GB')")
 ):
 
-    return search_products_sorted(query=q, limit=15)
+    return search_products_sorted(query=q, limit=25)
