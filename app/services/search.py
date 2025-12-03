@@ -7,7 +7,6 @@ from urllib.parse import urlparse
 from tavily import TavilyClient
 from app.core.config import get_settings, get_india_domains
 
-
 settings = get_settings()
 INDIA_ECOM_DOMAINS = get_india_domains()
 tavily_client = TavilyClient(api_key=settings.tavily_api_key)
@@ -40,7 +39,6 @@ def _price_str_to_float(price_str: str) -> Optional[float]:
         return float(digits)
     except ValueError:
         return None
-
 
 
 def _platform_from_url(url: str) -> str:
@@ -85,7 +83,6 @@ ACCESSORY_KEYWORDS = [
     "power bank",
 ]
 
-# platforms we consider "strong" ecom sites
 ALLOWED_PLATFORMS = {"amazon", "flipkart", "croma", "reliance digital", "myntra", "ajio"}
 
 
@@ -139,7 +136,7 @@ def _looks_like_main_product(title: str, snippet: str, query: str) -> bool:
 
     main_phrase = _main_phrase_from_query(query)
     if not main_phrase:
-        return True  # nothing to enforce
+        return True  
 
     norm_main = _normalize_for_match(main_phrase)
     norm_title = _normalize_for_match(t)
@@ -157,43 +154,57 @@ def _is_non_accessory(title: str, snippet: str) -> bool:
     return not _is_accessory_text(combined)
 
 
-# -------------------------------------------------------------------
-# Image helper
-# -------------------------------------------------------------------
-
 def _get_image_from_result_or_search(
     result: Dict[str, Any],
     search_images: List[Any],
     index: int,
+    url: str,  
 ) -> Optional[str]:
     """
-    Try to pull an image for a product:
-    1) If Tavily ever adds per-result images (result['images']), use that.
-    2) Otherwise, use top-level search images (response['images']) in a round-robin way.
+    Try AGGRESSIVELY to pull an image for a product:
+    1) Per-result images (if Tavily provides them)
+    2) Top-level search images (round-robin)
+    3) Extract images from the actual product page using Tavily extract
     """
-    # 1) per-result images (future-proof)
+ 
     images = result.get("images") or []
     if isinstance(images, list) and images:
         img0 = images[0]
         if isinstance(img0, str):
             return img0
         if isinstance(img0, dict):
-            return img0.get("url")
+            img_url = img0.get("url")
+            if img_url:
+                return img_url
 
-    # 2) top-level images
     if search_images:
         img = search_images[index % len(search_images)]
         if isinstance(img, str):
             return img
         if isinstance(img, dict):
-            return img.get("url")
+            img_url = img.get("url")
+            if img_url:
+                return img_url
+    try:
+        extract_resp = tavily_client.extract(
+            urls=[url],
+            include_images=True 
+        )
+        extracted = extract_resp.get("results") or []
+        if extracted:
+            page_images = extracted[0].get("images") or []
+            if isinstance(page_images, list) and page_images:
+                first_img = page_images[0]
+                if isinstance(first_img, str):
+                    return first_img
+                if isinstance(first_img, dict):
+                    img_url = first_img.get("url")
+                    if img_url:
+                        return img_url
+    except Exception:
+        pass
 
     return None
-
-
-# -------------------------------------------------------------------
-# Main function
-# -------------------------------------------------------------------
 
 def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
     """
@@ -207,12 +218,12 @@ def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
     try:
         search_result: Dict[str, Any] = tavily_client.search(
             query=query,
-            search_depth="basic",                       # faster
+            search_depth="basic",                       
             topic="general",
-            max_results=max(limit * 5, 40),            # ask more so we can filter
+            max_results=5,       
             include_answer=False,
-            include_raw_content=True,                  # 🔴 changed: use raw_content for better price detection
-            include_images=True,                       # needed for imageUrl
+            include_raw_content=True,                 
+            include_images=True,                       
             include_domains=INDIA_ECOM_DOMAINS,
             use_cache=True,
         )
@@ -236,16 +247,12 @@ def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
     strict_offers: List[Dict[str, Any]] = []
     fallback_offers: List[Dict[str, Any]] = []
 
-    # ------------------------------------------------------------------
-    # 1st pass: apply your normal filters (accessory + platform + phrase)
-    # ------------------------------------------------------------------
     for r in results:
         url: str = r.get("url") or ""
         title: str = r.get("title") or query
         content: str = r.get("content") or ""
         raw_content: str = r.get("raw_content") or ""
 
-        # Use more text to try and find price (title + snippet + raw content)
         text_for_price = f"{title} {content} {raw_content}"
         price_str: Optional[str] = _extract_price_from_text(text_for_price)
         price_num = _price_str_to_float(price_str) if price_str else None
@@ -253,7 +260,6 @@ def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
         platform = _platform_from_url(url)
         platform_lower = platform.lower()
 
-        # is it a known ecom site?
         is_known_platform = any(key in platform_lower for key in [
             "amazon",
             "flipkart",
@@ -265,7 +271,6 @@ def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
 
         snippet_for_match = content or raw_content
 
-        # classify into strict or fallback (even if price is missing)
         if _looks_like_main_product(title, snippet_for_match, query) and is_known_platform:
             bucket = strict_offers
         elif _is_non_accessory(title, snippet_for_match):
@@ -277,12 +282,13 @@ def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
             result=r,
             search_images=search_images,
             index=len(strict_offers) + len(fallback_offers),
+            url=url,  
         )
 
         candidate = {
             "productName": title,
-            "price_str": price_str,        # can be None
-            "price_num": price_num,        # can be None
+            "price_str": price_str,        
+            "price_num": price_num,        
             "platform": platform,
             "deepLink": url,
             "imageUrl": image_url,
@@ -290,10 +296,6 @@ def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
 
         bucket.append(candidate)
 
-    # ------------------------------------------------------------------
-    # If we got *nothing* even after relaxed price requirement,
-    # use a last-resort fallback: take top results as-is (no accessory filter)
-    # ------------------------------------------------------------------
     if not strict_offers and not fallback_offers:
         generic_offers: List[Dict[str, Any]] = []
         for idx, r in enumerate(results[:limit]):
@@ -312,6 +314,7 @@ def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
                 result=r,
                 search_images=search_images,
                 index=idx,
+                url=url,  
             )
 
             generic_offers.append({
@@ -332,12 +335,8 @@ def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
 
         combined = generic_offers
     else:
-        # strict first (best matches), then fallback to fill up
         combined = strict_offers + fallback_offers
 
-    # --------------------------
-    # De-duplicate by deepLink
-    # --------------------------
     seen_links = set()
     unique_offers: List[Dict[str, Any]] = []
     for o in combined:
@@ -354,11 +353,7 @@ def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
             "data": [],
         }
 
-    # ----------------------------------------------
-    # Sort by price (priced first, then unpriced)
-    # ----------------------------------------------
     def sort_key(o: Dict[str, Any]):
-        # (0, price_num) for priced, (1, 0) for unpriced
         price_num = o.get("price_num")
         return (0, price_num) if price_num is not None else (1, 0)
 
@@ -368,7 +363,7 @@ def search_products_sorted(query: str, limit: int = 15) -> Dict[str, Any]:
     data = [
         {
             "productName": o["productName"],
-            "price": o["price_str"] or "N/A",  # show "N/A" if no price found
+            "price": o["price_str"] or "Not found",  
             "platform": o["platform"],
             "deepLink": o["deepLink"],
             "imageUrl": o["imageUrl"],

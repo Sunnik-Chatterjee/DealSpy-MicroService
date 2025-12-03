@@ -13,6 +13,54 @@ from app.services.search import (
 )
 
 
+def _get_image_aggressively(url: str, result: Dict[str, Any], search_images: List[Any]) -> Optional[str]:
+    """
+    ✅ NEW HELPER - Aggressively extract image from multiple sources:
+    1. Per-result images (if Tavily provides them in the result)
+    2. Top-level search images
+    3. Extract images directly from the product page
+    """
+    images = result.get("images") or []
+    if isinstance(images, list) and images:
+        img0 = images[0]
+        if isinstance(img0, str):
+            return img0
+        elif isinstance(img0, dict):
+            img_url = img0.get("url")
+            if img_url:
+                return img_url
+
+    if search_images:
+        img = search_images[0]  
+        if isinstance(img, str):
+            return img
+        elif isinstance(img, dict):
+            img_url = img.get("url")
+            if img_url:
+                return img_url
+
+    try:
+        extract_resp = tavily_client.extract(
+            urls=[url],
+            include_images=True 
+        )
+        extracted = extract_resp.get("results") or []
+        if extracted:
+            page_images = extracted[0].get("images") or []
+            if isinstance(page_images, list) and page_images:
+                first_img = page_images[0]
+                if isinstance(first_img, str):
+                    return first_img
+                elif isinstance(first_img, dict):
+                    img_url = first_img.get("url")
+                    if img_url:
+                        return img_url
+    except Exception:
+        pass
+
+    return None
+
+
 def find_lowest_price_offer(query: str) -> Dict[str, Any]:
     """
     Use Tavily (restricted to INDIA_ECOM_DOMAINS from .env)
@@ -21,12 +69,12 @@ def find_lowest_price_offer(query: str) -> Dict[str, Any]:
     try:
         search_result: Dict[str, Any] = tavily_client.search(
             query=query,
-            search_depth="advanced",
+            search_depth="basic",
             topic="general",
-            max_results=25,
+            max_results=5,
             include_answer=False,
-            include_raw_content=False,
-            include_images=True,
+            include_raw_content=True,  
+            include_images=True,  
             include_domains=INDIA_ECOM_DOMAINS,
             use_cache=True,
         )
@@ -34,6 +82,8 @@ def find_lowest_price_offer(query: str) -> Dict[str, Any]:
         return {"success": False, "reason": f"tavily_error:{e}", "offer": None}
 
     results: List[Dict[str, Any]] = search_result.get("results") or []
+    search_images: List[Any] = search_result.get("images") or []  
+
     if not results:
         return {"success": False, "reason": "no_results", "offer": None}
 
@@ -44,20 +94,20 @@ def find_lowest_price_offer(query: str) -> Dict[str, Any]:
         url: str = r.get("url") or ""
         title: str = r.get("title") or query
         snippet: str = r.get("content") or ""
+        raw_content: str = r.get("raw_content") or ""  
 
-        # Try extract full page content to get price
-        price_str: Optional[str] = None
-        try:
-            extract_resp = tavily_client.extract(urls=[url], include_images=False)
-            extracted = extract_resp.get("results") or []
-            if extracted:
-                page_content = extracted[0].get("content") or ""
-                price_str = _extract_price_from_text(page_content)
-        except Exception:
-            pass
+        text_for_price = f"{title} {snippet} {raw_content}"
+        price_str: Optional[str] = _extract_price_from_text(text_for_price)
 
-        if price_str is None:
-            price_str = _extract_price_from_text(snippet)
+        if not price_str:
+            try:
+                extract_resp = tavily_client.extract(urls=[url], include_images=False)
+                extracted = extract_resp.get("results") or []
+                if extracted:
+                    page_content = extracted[0].get("content") or ""
+                    price_str = _extract_price_from_text(page_content)
+            except Exception:
+                pass
 
         if not price_str:
             continue
@@ -66,15 +116,7 @@ def find_lowest_price_offer(query: str) -> Dict[str, Any]:
         if price_num is None:
             continue
 
-        # image
-        image_url = None
-        images = r.get("images") or []
-        if isinstance(images, list) and images:
-            img0 = images[0]
-            if isinstance(img0, str):
-                image_url = img0
-            elif isinstance(img0, dict):
-                image_url = img0.get("url")
+        image_url = _get_image_aggressively(url, r, search_images)
 
         platform = _platform_from_url(url)
 
@@ -105,7 +147,7 @@ def update_product_lowest_price(
     """
     Update a single Product row:
       - Tavily lowest price for (query or product.name)
-      - currentPrice, lastLowestPrice, isPriceDropped, imageUrl, deepLink
+      - currentPrice, lastLowestPrice, isPriceDropped, imageUrl, deepLink, platform
     """
     product = db.get(Product, product_id)
     if not product:
@@ -135,6 +177,7 @@ def update_product_lowest_price(
 
     product.image_url = offer["imageUrl"]
     product.deep_link = offer["deepLink"]
+    product.platform = offer["platform"]
 
     db.add(product)
     db.commit()
@@ -158,6 +201,7 @@ def refresh_all_products_lowest_prices(db: Session) -> Dict[str, Any]:
           isPriceDropped
           imageUrl
           deepLink
+          platform
     """
     products = db.query(Product).all()
 
@@ -197,6 +241,7 @@ def refresh_all_products_lowest_prices(db: Session) -> Dict[str, Any]:
 
         product.image_url = offer["imageUrl"]
         product.deep_link = offer["deepLink"]
+        product.platform = offer["platform"]
 
         db.add(product)
         updated += 1
