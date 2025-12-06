@@ -9,7 +9,7 @@ router = APIRouter(prefix="/v1/search", tags=["search"])
 
 class ProductData(BaseModel):
     productName: str
-    price: str
+    price: float
     platform: str
     deepLink: str
     imageUrl: str | None = None
